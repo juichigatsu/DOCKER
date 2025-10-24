@@ -1,0 +1,104 @@
+---
+- name: Clone repo, build Docker image, and optionally push
+  hosts: ubuntu_nodes,centos
+  become: yes
+  gather_facts: yes
+
+  vars:
+    git_repo: "https://github.com/juichigatsu/DOCKER.git"
+    git_dest: "/tmp/DOCKER"
+    git_version: "main"
+    build_subdir: "dockerfile"            # folder inside repo containing Dockerfile
+    image_name: "juichigatsu/myapp"       # repository/name for the image
+    image_tag: "latest"
+    image_full_name: "{{ image_name }}:{{ image_tag }}"
+
+    # Registry vars: if registry_url is set, the playbook will attempt to push.
+    # Examples: registry_url: "registry.hub.docker.com" or "ghcr.io/yourorg"
+    # Provide registry_username and registry_password when registry_url is set.
+    registry_url: "{{ registry_url | default('') }}"
+    registry_username: "{{ registry_username | default('') }}"
+    registry_password: "{{ registry_password | default('') }}"
+
+  tasks:
+    - name: Check that docker CLI is available
+      ansible.builtin.command: docker --version
+      register: docker_check
+      ignore_errors: yes
+
+    - name: Fail early if docker CLI is missing
+      ansible.builtin.fail:
+        msg: "Docker CLI is not available on {{ inventory_hostname }}. Install Docker on the host before running this playbook."
+      when: docker_check.rc != 0
+
+    - name: Ensure destination parent directory exists
+      ansible.builtin.file:
+        path: "{{ git_dest }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Clone (or update) the Git repo (branch/main)
+      ansible.builtin.git:
+        repo: "{{ git_repo }}"
+        dest: "{{ git_dest }}"
+        version: "{{ git_version }}"
+        force: yes
+        update: yes
+
+    - name: Verify Dockerfile exists in build context
+      ansible.builtin.stat:
+        path: "{{ git_dest }}/{{ build_subdir }}/Dockerfile"
+      register: dockerfile_stat
+
+    - name: Fail if Dockerfile not found
+      ansible.builtin.fail:
+        msg: "Dockerfile not found at {{ git_dest }}/{{ build_subdir }}/Dockerfile on {{ inventory_hostname }}. Ensure your repo contains the dockerfile folder."
+      when: not dockerfile_stat.stat.exists
+
+    - name: Build Docker image
+      ansible.builtin.command: >
+        docker build -t {{ image_full_name }} {{ git_dest }}/{{ build_subdir }}
+      args:
+        chdir: "{{ git_dest }}/{{ build_subdir }}"
+      register: build_result
+      changed_when: "'Successfully built' in (build_result.stdout + build_result.stderr) or build_result.rc == 0"
+      failed_when: build_result.rc != 0
+
+    - name: Show image build result (short)
+      ansible.builtin.debug:
+        msg: "Image {{ image_full_name }} built on {{ inventory_hostname }}"
+
+    - name: Prepare for push - set registry target (only when registry_url provided)
+      ansible.builtin.set_fact:
+        registry_target: "{{ registry_url | regex_replace('/$','') }}/{{ image_name }}:{{ image_tag }}"
+      when: registry_url != ""
+
+    - name: Login to registry (only when registry_url provided)
+      ansible.builtin.shell: |
+        printf '%s' "{{ registry_password }}" | docker login {{ registry_url }} --username "{{ registry_username }}" --password-stdin
+      when: registry_url != ""
+      no_log: true
+      register: docker_login
+      failed_when: docker_login.rc != 0
+
+    - name: Tag image for registry (only when registry_url provided)
+      ansible.builtin.command: docker tag {{ image_full_name }} {{ registry_target }}
+      when: registry_url != ""
+      register: tag_result
+      failed_when: tag_result.rc != 0
+
+    - name: Push image to registry (only when registry_url provided)
+      ansible.builtin.command: docker push {{ registry_target }}
+      when: registry_url != ""
+      register: push_result
+      failed_when: push_result.rc != 0
+
+    - name: Show push result (only when registry_url provided)
+      ansible.builtin.debug:
+        msg: "Pushed {{ registry_target }} from {{ inventory_hostname }}"
+      when: registry_url != ""
+
+
+

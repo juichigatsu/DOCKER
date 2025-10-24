@@ -1,6 +1,6 @@
 ---
-- name: Deploy and manage Nginx container
-  hosts: all
+- name: Deploy Nginx on Ubuntu nodes
+  hosts: ubuntu_nodes
   become: yes
   gather_facts: yes
 
@@ -8,23 +8,20 @@
     container_name: webserver_prod
     image_name: nginx:latest
     host_port: 8080
-    docker_env:
-      DOCKER_HOST: "unix:///var/run/docker.sock"
 
   tasks:
-    - name: Ensure Docker service is running and enabled
+    - name: Ensure Docker service is running and enabled (Ubuntu)
       ansible.builtin.service:
         name: docker
         state: started
         enabled: yes
 
-    - name: Pull the latest Nginx image
+    - name: Pull the latest Nginx image (Ubuntu)
       community.docker.docker_image:
         name: "{{ image_name }}"
         source: pull
-      environment: "{{ docker_env }}"
 
-    - name: Create and run the Nginx container
+    - name: Create and run the Nginx container (Ubuntu)
       community.docker.docker_container:
         name: "{{ container_name }}"
         image: "{{ image_name }}"
@@ -32,7 +29,41 @@
         restart_policy: always
         ports:
           - "{{ host_port }}:80"
-      environment: "{{ docker_env }}"
+
+- name: Deploy Nginx on CentOS nodes
+  hosts: centos
+  become: yes
+  gather_facts: yes
+
+  vars:
+    container_name: webserver_prod
+    image_name: nginx:latest
+    host_port: 8080
+    # force unix socket for CentOS to avoid http+docker errors
+    centos_docker_host: "unix:///var/run/docker.sock"
+
+  tasks:
+    - name: Ensure Docker service is running and enabled (CentOS)
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Pull the latest Nginx image (CentOS)
+      community.docker.docker_image:
+        name: "{{ image_name }}"
+        source: pull
+        docker_host: "{{ centos_docker_host }}"
+
+    - name: Create and run the Nginx container (CentOS)
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ image_name }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ host_port }}:80"
+        docker_host: "{{ centos_docker_host }}"
 
 
 
