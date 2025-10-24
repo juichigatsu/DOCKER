@@ -1,0 +1,34 @@
+---
+- name: User 'kai' in docker group (Ubuntu + CentOS)
+  hosts: ubuntu_nodes,centos
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # default to kai — override with -e "username=..." if you want a different user
+    target_user: "{{ username | default('kai') }}"
+
+  tasks:
+    - name: Docker group
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Target user
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        state: present
+        create_home: yes
+        shell: /bin/bash
+
+    - name: Add target user to docker group
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        groups: docker
+        append: yes
+
+    - name: Show which user was added
+      ansible.builtin.debug:
+        msg: "User '{{ target_user }}' is present and a member of docker on {{ inventory_hostname }}"
+
+
