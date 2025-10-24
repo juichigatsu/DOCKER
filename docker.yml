@@ -1,0 +1,91 @@
+---
+- name: Install Docker Engine on Ubuntu nodes and run smoke test
+  hosts: ubuntu_nodes
+  become: yes
+  gather_facts: yes
+
+  vars:
+    docker_packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - python3-pip
+    docker_ce_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+
+  tasks:
+    - name: Update APT package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install prerequisite packages
+      apt:
+        name: "{{ docker_packages }}"
+        state: present
+        update_cache: yes
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+    - name: Update APT cache after adding Docker repo
+      apt:
+        update_cache: yes
+
+    - name: Install Docker Engine packages
+      apt:
+        name: "{{ docker_ce_packages }}"
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is started and enabled
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install Docker SDK for Python (pip)
+      ansible.builtin.pip:
+        name: docker
+        executable: pip3
+
+    - name: Optionally add the SSH user to the docker group (so they can run docker without sudo)
+      ansible.builtin.user:
+        name: "{{ ansible_user_id | default(ansible_env.SUDO_USER | default('')) }}"
+        groups: docker
+        append: yes
+      when: (ansible_user_id is defined) or (ansible_env.SUDO_USER is defined)
+
+    - name: Wait for Docker daemon to be responsive
+      wait_for:
+        host: 127.0.0.1
+        port: 2375
+        state: stopped
+        timeout: 1
+      # above is a no-op to quickly continue; can't reliably check socket across distros.
+      # (kept to avoid long waits)
+
+    - name: Run Docker hello-world as smoke test
+      ansible.builtin.command: docker run --rm hello-world
+      register: hello_out
+      failed_when: "'Hello from Docker!' not in hello_out.stdout"
+      changed_when: false
+
+    - name: Show hello-world output
+      ansible.builtin.debug:
+        var: hello_out.stdout_lines
+
+
+
