@@ -1,5 +1,5 @@
 ---
-- name: Clone repo, build Docker image, and optionally push
+- name: Clone repo, detect build context, build Docker image, and optionally push
   hosts: ubuntu_nodes,centos
   become: yes
   gather_facts: yes
@@ -8,19 +8,89 @@
     git_repo: "https://github.com/juichigatsu/DOCKER.git"
     git_dest: "/tmp/DOCKER"
     git_version: "main"
-    build_subdir: "dockerfile"            # folder inside repo containing Dockerfile
-    image_name: "juichigatsu/myapp"       # repository/name for the image
+    build_subdir: "dockerfile"
+    image_name: "juichigatsu/myapp"
     image_tag: "latest"
     image_full_name: "{{ image_name }}:{{ image_tag }}"
 
-    # Registry vars: if registry_url is set, the playbook will attempt to push.
-    # Examples: registry_url: "registry.hub.docker.com" or "ghcr.io/yourorg"
-    # Provide registry_username and registry_password when registry_url is set.
     registry_url: "{{ registry_url | default('') }}"
     registry_username: "{{ registry_username | default('') }}"
     registry_password: "{{ registry_password | default('') }}"
 
   tasks:
+    - name: Stat git_dest path
+      ansible.builtin.stat:
+        path: "{{ git_dest }}"
+        follow: false
+      register: git_dest_stat
+
+    - name: Remove git_dest if it exists and is not a directory
+      ansible.builtin.file:
+        path: "{{ git_dest }}"
+        state: absent
+      when:
+        - git_dest_stat.stat.exists
+        - not git_dest_stat.stat.isdir
+
+    - name: Ensure git_dest directory exists
+      ansible.builtin.file:
+        path: "{{ git_dest }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Clone (shallow) the Git repo (branch/main)
+      ansible.builtin.git:
+        repo: "{{ git_repo }}"
+        dest: "{{ git_dest }}"
+        version: "{{ git_version }}"
+        depth: 1
+        force: yes
+        update: yes
+
+    - name: Stat expected build directory ({{ git_dest }}/{{ build_subdir }})
+      ansible.builtin.stat:
+        path: "{{ git_dest }}/{{ build_subdir }}"
+      register: build_dir_stat
+
+    - name: Stat Dockerfile at {{ git_dest }}/{{ build_subdir }}/Dockerfile
+      ansible.builtin.stat:
+        path: "{{ git_dest }}/{{ build_subdir }}/Dockerfile"
+      register: dockerfile_in_subdir_stat
+
+    - name: Stat Dockerfile at repo root {{ git_dest }}/Dockerfile
+      ansible.builtin.stat:
+        path: "{{ git_dest }}/Dockerfile"
+      register: dockerfile_in_root_stat
+
+    - name: Decide build_context — use subdir if it exists and contains Dockerfile
+      ansible.builtin.set_fact:
+        build_context: "{{ git_dest }}/{{ build_subdir }}"
+      when:
+        - build_dir_stat.stat.exists
+        - dockerfile_in_subdir_stat.stat.exists
+
+    - name: Decide build_context — use repo root if Dockerfile is at repo root
+      ansible.builtin.set_fact:
+        build_context: "{{ git_dest }}"
+      when:
+        - dockerfile_in_root_stat.stat.exists
+        - build_context is not defined
+
+    - name: Fail if no Dockerfile found in either location
+      ansible.builtin.fail:
+        msg: >
+          Could not find Dockerfile. Looked at:
+          - {{ git_dest }}/{{ build_subdir }}/Dockerfile
+          - {{ git_dest }}/Dockerfile
+          Ensure your repo contains a Dockerfile in one of those paths.
+      when: build_context is not defined
+
+    - name: Show chosen build context
+      ansible.builtin.debug:
+        msg: "Building image from context '{{ build_context }}' on {{ inventory_hostname }}"
+
     - name: Check that docker CLI is available
       ansible.builtin.command: docker --version
       register: docker_check
@@ -31,37 +101,11 @@
         msg: "Docker CLI is not available on {{ inventory_hostname }}. Install Docker on the host before running this playbook."
       when: docker_check.rc != 0
 
-    - name: Ensure destination parent directory exists
-      ansible.builtin.file:
-        path: "{{ git_dest }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Clone (or update) the Git repo (branch/main)
-      ansible.builtin.git:
-        repo: "{{ git_repo }}"
-        dest: "{{ git_dest }}"
-        version: "{{ git_version }}"
-        force: yes
-        update: yes
-
-    - name: Verify Dockerfile exists in build context
-      ansible.builtin.stat:
-        path: "{{ git_dest }}/{{ build_subdir }}/Dockerfile"
-      register: dockerfile_stat
-
-    - name: Fail if Dockerfile not found
-      ansible.builtin.fail:
-        msg: "Dockerfile not found at {{ git_dest }}/{{ build_subdir }}/Dockerfile on {{ inventory_hostname }}. Ensure your repo contains the dockerfile folder."
-      when: not dockerfile_stat.stat.exists
-
     - name: Build Docker image
       ansible.builtin.command: >
-        docker build -t {{ image_full_name }} {{ git_dest }}/{{ build_subdir }}
+        docker build -t {{ image_full_name }} {{ build_context }}
       args:
-        chdir: "{{ git_dest }}/{{ build_subdir }}"
+        chdir: "{{ build_context }}"
       register: build_result
       changed_when: "'Successfully built' in (build_result.stdout + build_result.stderr) or build_result.rc == 0"
       failed_when: build_result.rc != 0
